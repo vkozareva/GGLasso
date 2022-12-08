@@ -10,8 +10,10 @@ import warnings
 
 from .ggl_helper import prox_od_1norm, phiplus, prox_rank_norm
 
+BIG = 1e10
 
 def ADMM_SGL(S, lambda1, Omega_0, Theta_0=np.array([]), X_0=np.array([]),
+             W=np.array([]), zeros=np.array([]),
              rho=1., max_iter=1000, tol=1e-7, rtol=1e-4, stopping_criterion='boyd',\
              update_rho=True, verbose=False, measure=False, latent=False, mu1=None):
     """
@@ -45,6 +47,11 @@ def ADMM_SGL(S, lambda1, Omega_0, Theta_0=np.array([]), X_0=np.array([]),
         starting point for the Theta variable. If not specified, it is set to the same as Omega_0.
     X_0 : array (p,p), optional
         starting point for the X variable. If not specified, it is set to zero array.
+    W : array (p,), optional
+        Vector of weights to be used as regularization penalties
+    zeros : array (n,2), optional
+        Indices of precision matrix to be constrained to 0. Each row of this (n,2) indicates a (j,k) index. Only one of
+        (j,k) needs to be indicated, as the precision matrix is symmetric.
     rho : float, positive, optional
         step size paramater for the augmented Lagrangian in ADMM. The default is 1. Tune this parameter for optimal performance.
     max_iter : int, optional
@@ -99,6 +106,19 @@ def ADMM_SGL(S, lambda1, Omega_0, Theta_0=np.array([]), X_0=np.array([]),
         Theta_0 = Omega_0.copy()
     if len(X_0) == 0:
         X_0 = np.zeros((p, p))
+    if len(W) == 0:
+        W = np.ones(p)
+    else:
+        assert W.shape == (S.shape[0],)
+
+	# Convert W vector into p x p matrix (as in glasso package)
+    W = np.sqrt(np.outer(W, W))
+
+	# Set high penalties for zeros
+    if len(zeros) != 0:
+	    for row in zeros:
+		    W[row[0], row[1]] = BIG
+		    W[row[1], row[0]] = BIG
 
     Theta_t = Theta_0.copy()
     L_t = np.zeros((p, p))
@@ -108,6 +128,8 @@ def ADMM_SGL(S, lambda1, Omega_0, Theta_0=np.array([]), X_0=np.array([]),
     residual = np.zeros(max_iter)
     status = ''
 
+    print("Using weight matrix with values")
+    print(W[:5, :5])
 
     if verbose:
         print("------------ADMM Algorithm for Single Graphical Lasso----------------")
@@ -120,6 +142,8 @@ def ADMM_SGL(S, lambda1, Omega_0, Theta_0=np.array([]), X_0=np.array([]),
             hdr_fmt = "%4s\t%10s"
             out_fmt = "%4d\t%10.4g"
             print(hdr_fmt % ("iter", "kkt residual"))
+
+
 
     ##################################################################
     ### MAIN LOOP STARTS
@@ -136,7 +160,7 @@ def ADMM_SGL(S, lambda1, Omega_0, Theta_0=np.array([]), X_0=np.array([]),
         Omega_t = phiplus(beta=1 / rho, D=eigD, Q=eigQ)
 
         # Theta Update
-        Theta_t = prox_od_1norm(Omega_t + L_t + X_t, (1 / rho) * lambda1)
+        Theta_t = prox_od_1norm(Omega_t + L_t + X_t, (1 / rho) * lambda1 * W)
 
         # L Update
         if latent:
@@ -148,8 +172,8 @@ def ADMM_SGL(S, lambda1, Omega_0, Theta_0=np.array([]), X_0=np.array([]),
         # X Update
         X_t = X_t + Omega_t - Theta_t + L_t
 
-        
-        
+
+
         if measure:
             end = time.time()
             runtime[iter_t] = end - start
@@ -158,7 +182,7 @@ def ADMM_SGL(S, lambda1, Omega_0, Theta_0=np.array([]), X_0=np.array([]),
         if stopping_criterion == 'boyd':
             r_t,s_t,e_pri,e_dual = ADMM_stopping_criterion(Omega_t, Omega_t_1, Theta_t, L_t, X_t,\
                                                            S, rho, tol, rtol, latent)
-            
+
             # update rho
             if update_rho:
                 if r_t >= 10*s_t:
@@ -167,12 +191,12 @@ def ADMM_SGL(S, lambda1, Omega_0, Theta_0=np.array([]), X_0=np.array([]),
                     rho_new = 0.5*rho
                 else:
                     rho_new = 1.*rho
-                
+
                 # rescale dual variables
                 X_t = (rho/rho_new)*X_t
                 rho = rho_new
-                
-                
+
+
             residual[iter_t] = max(r_t,s_t)
 
             if verbose:
@@ -180,7 +204,7 @@ def ADMM_SGL(S, lambda1, Omega_0, Theta_0=np.array([]), X_0=np.array([]),
             if (r_t <= e_pri) and  (s_t <= e_dual):
                 status = 'optimal'
                 break
-
+		#TODO: maybe update this stopping criterion with W values
         elif stopping_criterion == 'kkt':
             eta_A = kkt_stopping_criterion(Omega_t, Theta_t, L_t, rho * X_t, S, lambda1, latent, mu1)
             residual[iter_t] = eta_A
@@ -213,10 +237,10 @@ def ADMM_SGL(S, lambda1, Omega_0, Theta_0=np.array([]), X_0=np.array([]),
     ### CHECK FOR SYMMETRY
     if abs((Omega_t).T - Omega_t).max() > 1e-5:
         warnings.warn(f"Omega variable is not symmetric, largest deviation is {abs((Omega_t).T - Omega_t).max()}.")
-    
+
     if abs((Theta_t).T - Theta_t).max() > 1e-5:
         warnings.warn(f"Theta variable is not symmetric, largest deviation is {abs((Theta_t).T - Theta_t).max()}.")
-    
+
     if abs((L_t).T - L_t).max() > 1e-5:
         warnings.warn(f"L variable is not symmetric, largest deviation is {abs((L_t).T - L_t).max()}.")
 
@@ -292,7 +316,7 @@ def kkt_stopping_criterion(Omega, Theta, L, X, S, lambda1, latent=False, mu1=Non
 ## BLOCK-WISE GRAPHICAL LASSO AFTER WITTEN ET AL.
 #######################################################
 
-def block_SGL(S, lambda1, Omega_0, Theta_0=None, X_0=None, rho=1., max_iter=1000, 
+def block_SGL(S, lambda1, Omega_0, Theta_0=None, X_0=None, rho=1., max_iter=1000,
               tol=1e-7, rtol=1e-3, stopping_criterion="boyd",
               update_rho=True, verbose=False, measure=False):
     """
